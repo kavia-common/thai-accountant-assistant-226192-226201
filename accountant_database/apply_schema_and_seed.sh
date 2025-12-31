@@ -19,13 +19,19 @@ if [ ! -f "${CONN_FILE}" ]; then
   exit 1
 fi
 
+# db_connection.txt contains a full mysql command (including user/pass/host/port/db).
+# Example: mysql -u appuser -pdbuser123 -h localhost -P 5000 myapp
 MYSQL_CMD="$(cat "${CONN_FILE}")"
 echo "Using connection: ${MYSQL_CMD}"
 
 run_sql () {
   local sql="$1"
-  # Execute statement as a single line
-  eval "${MYSQL_CMD} -e \"${sql}\"" >/dev/null
+  # Execute statement as a single line; show the statement if it fails for easier diagnosis.
+  if ! eval "${MYSQL_CMD} --protocol=TCP -e \"${sql}\"" >/dev/null; then
+    echo "ERROR applying SQL statement:"
+    echo "${sql}"
+    exit 1
+  fi
 }
 
 echo "Creating tables (idempotent)..."
@@ -56,6 +62,14 @@ run_sql "CREATE TABLE IF NOT EXISTS classifications (id BIGINT UNSIGNED NOT NULL
 # ---- reports ----
 # Requested: id, report_type (summary|pnl), period_start, period_end, generated_at, payload_json
 run_sql "CREATE TABLE IF NOT EXISTS reports (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, report_type ENUM('summary','pnl') NOT NULL, period_start DATE NOT NULL, period_end DATE NOT NULL, generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, payload_json JSON NOT NULL, created_by_user_id BIGINT UNSIGNED NULL, PRIMARY KEY (id), KEY idx_reports_type_period (report_type, period_start, period_end), KEY idx_reports_generated_at (generated_at), KEY idx_reports_created_by (created_by_user_id), CONSTRAINT fk_reports_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE RESTRICT ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+
+# ---- reports_summary (explicit table requested) ----
+# Summary snapshot convenience table. payload_json holds the full summary object.
+run_sql "CREATE TABLE IF NOT EXISTS reports_summary (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, period_start DATE NOT NULL, period_end DATE NOT NULL, generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, payload_json JSON NOT NULL, created_by_user_id BIGINT UNSIGNED NULL, PRIMARY KEY (id), UNIQUE KEY uniq_reports_summary_period (period_start, period_end), KEY idx_reports_summary_generated_at (generated_at), KEY idx_reports_summary_created_by (created_by_user_id), CONSTRAINT fk_reports_summary_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE RESTRICT ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+
+# ---- reports_pnl_snapshots (explicit table requested) ----
+# P&L snapshot convenience table. payload_json holds lines/totals.
+run_sql "CREATE TABLE IF NOT EXISTS reports_pnl_snapshots (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, period_start DATE NOT NULL, period_end DATE NOT NULL, generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, payload_json JSON NOT NULL, created_by_user_id BIGINT UNSIGNED NULL, PRIMARY KEY (id), UNIQUE KEY uniq_reports_pnl_period (period_start, period_end), KEY idx_reports_pnl_generated_at (generated_at), KEY idx_reports_pnl_created_by (created_by_user_id), CONSTRAINT fk_reports_pnl_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE RESTRICT ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
 
 # ---- reconciliation_runs ----
 # Requested: id, started_at, finished_at, status, notes

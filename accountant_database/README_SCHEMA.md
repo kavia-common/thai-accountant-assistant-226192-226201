@@ -160,6 +160,17 @@ After running `./apply_schema_and_seed.sh`:
 - Verify category tree (children):
   - `SELECT c2.name_th AS child_th, c1.name_th AS parent_th, c2.type FROM categories c2 LEFT JOIN categories c1 ON c2.parent_id=c1.id WHERE c2.parent_id IS NOT NULL ORDER BY parent_th, child_th;`
 
-- Verify constraints exist (example):
+- Verify report snapshot tables exist (requested: summary + P&L snapshots):
+  - `SHOW TABLES LIKE 'reports_%';`
+  - `DESCRIBE reports_summary;`
+  - `DESCRIBE reports_pnl_snapshots;`
+
+- Verify constraints exist (examples):
   - `SHOW CREATE TABLE classifications;`
   - `SHOW CREATE TABLE reconciliation_results;`
+
+- Verify idempotency quickly:
+  1) Run `./apply_schema_and_seed.sh` twice
+  2) Confirm seed duplicates were not created:
+     - `SELECT parent_id, name_th, COUNT(*) AS cnt FROM categories GROUP BY parent_id, name_th HAVING cnt > 1;`
+     - `SELECT email, COUNT(*) AS cnt FROM users GROUP BY email HAVING cnt > 1;`
