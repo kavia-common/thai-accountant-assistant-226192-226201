@@ -143,6 +143,19 @@ Seed includes a minimal Thai category tree suitable for demos:
 - VAT (ภาษีมูลค่าเพิ่ม) → VAT Input/Output
 - Misc (อื่นๆ)
 
+### Important MySQL idempotency note (top-level categories)
+MySQL UNIQUE indexes allow multiple rows with `NULL` values. That means `UNIQUE(parent_id, name_th)` **does not** prevent duplicates for top-level categories where `parent_id IS NULL`.
+
+To make the seed idempotent, the schema uses a generated column:
+- `parent_id_key GENERATED ALWAYS AS (COALESCE(parent_id,0))`
+and enforces:
+- `UNIQUE(parent_id_key, name_th)`
+
+This ensures top-level category seeds (where `parent_id` is NULL) do not duplicate across repeated runs.
+
+### Note on categories self-FK
+In some environments the self-referential foreign key on `categories.parent_id` may fail to (re-)add with `ERROR 1215`. The application logic primarily requires stable IDs + uniqueness for seeding; the FK is optional and can be re-enabled later if needed.
+
 Also seeds minimal optional demo users:
 - `admin@example.com`
 - `accountant@example.com`
