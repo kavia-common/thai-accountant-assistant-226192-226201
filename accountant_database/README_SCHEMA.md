@@ -1,10 +1,10 @@
-# Accountant App - MySQL Schema
+# Accountant App - MySQL Schema (Step 2.1)
 
 This container runs MySQL and creates the base database/user in `startup.sh`.
 
 To avoid changing preview startup behavior, the app schema **is not applied automatically** on startup.
 
-## Apply schema + seed data
+## Apply schema + seed data (idempotent)
 
 1. Start the DB container (this generates `db_connection.txt`):
    - `./startup.sh`
@@ -17,25 +17,12 @@ The apply script is platform-friendly:
 - Executes SQL **one statement at a time** via the MySQL CLI
 - Is **idempotent**:
   - `CREATE TABLE IF NOT EXISTS ...`
-  - `INSERT ... ON DUPLICATE KEY UPDATE ...` for seed data
+  - Seed data uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for safe re-runs
 
-## How data flows (high level)
-
-1. User uploads:
-   - Bank statement PDF/CSV or receipt image/PDF → stored as an `uploads` row.
-2. Extraction creates:
-   - `transactions` rows (line items) referencing the source `uploads` row.
-3. Classification assigns:
-   - `classifications` row per `transactions` row with category/vendor/tax tags.
-4. Reporting generates:
-   - `reports` snapshots (JSON) for summary and P&L.
-5. Reconciliation runs:
-   - `reconciliation_runs` + `reconciliation_results` mapping transactions to receipt uploads.
-
-## Tables (core)
+## Core tables
 
 ### `users` (optional)
-Minimal user table for attribution and overrides.
+Minimal user table for attribution.
 
 Key columns:
 - `email` (unique)
@@ -43,90 +30,122 @@ Key columns:
 
 Referenced by:
 - `uploads.uploaded_by_user_id` (nullable)
-- `classifications.overridden_by_user_id` (nullable)
 - `reports.created_by_user_id` (nullable)
 - `reconciliation_runs.created_by_user_id` (nullable)
+
+---
 
 ### `uploads`
 File metadata for bank statements, receipts, and other uploads.
 
-Key columns:
+Key columns (requested):
+- `id`
 - `upload_type`: `bank_statement | receipt | other`
-- `original_filename`, `stored_filename`, `mime_type`, `file_size_bytes`, `sha256`
-- Statement-specific fields: `statement_period_start`, `statement_period_end`
+- `original_filename` (filename)
+- `mime_type` (mime)
+- `file_size_bytes` (size)
+- `upload_time` (upload_time)
 - `status`: `uploaded | processing | processed | failed`
 
-Relationships:
-- One `uploads` → many `transactions` (bank statement line items)
-- Receipts are represented as `uploads` rows with `upload_type='receipt'`
+Notes:
+- `stored_filename`, `sha256` included for future-proofing.
+
+---
 
 ### `transactions`
-Extracted line items.
+Extracted line items from bank statement uploads (and potentially other sources).
 
-Key columns:
-- `source_upload_id` (FK → `uploads.id`)
-- `txn_date`, `posted_at`
-- `amount` (DECIMAL), `currency` (default `THB`)
-- `description`, `counterparty`, `reference_no`, `raw_text`
+Key columns (requested):
+- `upload_id` (FK → `uploads.id`)
+- `txn_date`
+- `amount` (DECIMAL)
+- `currency` (default `THB`)
+- `description`
+- `account`
+- `counterparty`
+- `source_ref`
+
+Normalized fields (for backend normalization/search):
+- `normalized_description`, `normalized_counterparty`, `normalized_account`, `normalized_memo`
+
+---
+
+### `categories`
+Thai chart-of-accounts / category tree used for classification and reporting.
+
+Key columns (requested):
+- `name_th`, `name_en`
+- `type`: `income | expense | cogs | other`
+- `parent_id` (self FK, nullable)
+
+Uniqueness:
+- `UNIQUE(parent_id, name_th)` to avoid duplicate Thai names under the same parent.
+
+---
 
 ### `classifications`
-One row per transaction (enforced by unique constraint).
+One row per transaction (enforced via unique constraint).
 
-Key columns:
-- `transaction_id` (FK → `transactions.id`, unique)
-- `category_id` (FK → `thai_accounting_categories.id`, nullable)
-- `vendor_id` (FK → `vendors.id`, nullable)
-- `tax_tags` (JSON), `confidence`, `is_overridden`, `overridden_by_user_id`, `notes`
+Key columns (requested):
+- `transaction_id` (unique FK → `transactions.id`)
+- `category_id` (FK → `categories.id`)
+- `subcategory_id` (FK → `categories.id`)
+- `vendor` (string label)
+- `tax_tag` (string label)
+- `confidence`
+- `source`: `manual | ai | rule`
+- `updated_at`
+
+---
 
 ### `reports`
-Summary and P&L snapshots stored as JSON to keep the schema minimal and flexible.
+Stores report snapshots as JSON.
 
-Key columns:
+Key columns (requested):
 - `report_type`: `summary | pnl`
 - `period_start`, `period_end`
 - `generated_at`
-- `parameters` (JSON), `snapshot` (JSON)
-- `created_by_user_id` (nullable)
+- `payload_json` (JSON)
+
+---
 
 ### `reconciliation_runs`
 Tracks a reconciliation process.
 
-Key columns:
-- `strategy`: `exact_amount_date | fuzzy | manual | hybrid`
-- `parameters` (JSON)
+Key columns (requested):
+- `started_at`
+- `finished_at`
 - `status`: `running | completed | failed`
-- `started_at`, `ended_at`, `created_by_user_id` (nullable)
+- `notes`
+
+---
 
 ### `reconciliation_results`
 Per-transaction reconciliation outcomes for a given run.
 
-Key columns:
-- `reconciliation_run_id` (FK → `reconciliation_runs.id`)
+Key columns (requested):
+- `run_id` (FK → `reconciliation_runs.id`)
 - `transaction_id` (FK → `transactions.id`)
-- `matched_receipt_upload_id` (FK → `uploads.id`, nullable)
-- `status`: `matched | unmatched | ambiguous | ignored`
-- `match_score`, `notes`
+- `receipt_upload_id` (FK → `uploads.id`, nullable)
+- `match_status`: `matched | unmatched | partial`
+- `confidence`
+- `notes`
 
 Constraints:
-- Unique per (run, transaction): `UNIQUE(reconciliation_run_id, transaction_id)`
+- Unique per (run, transaction): `UNIQUE(run_id, transaction_id)`
 
-## Reference tables (seeded)
+## Seed data (minimal Thai demo set)
 
-### `thai_accounting_categories`
-Thai-friendly chart-of-accounts baseline used for classification and P&L grouping.
+Seed includes a minimal Thai category tree suitable for demos:
+- Revenue (รายได้) → Sales (รายได้จากการขาย)
+- COGS (ต้นทุนขาย) → Purchases (ซื้อสินค้า/วัตถุดิบ)
+- Expenses (ค่าใช้จ่าย) → Utilities, Rent, Office Supplies, Transportation, Meals/Entertainment
+- VAT (ภาษีมูลค่าเพิ่ม) → VAT Input/Output
+- Misc (อื่นๆ)
 
-- Unique `code` (stable identifier)
-- `name_th`, `name_en`
-- `type`: `income | cogs | expense | asset | liability | equity | tax`
-
-Seed includes common Thai categories such as:
-- Income: Sales/Service/Interest
-- COGS: Purchases, inbound shipping
-- Operating expenses: Rent, Utilities, Internet/Phone, Salaries, Office supplies, Travel, Meals/Entertainment, Marketing, Professional fees, Repairs, Bank fees, Other
-- Tax: VAT input/output, Withholding tax
-
-### `vendors`
-Common vendors (Thai + English labels) with optional default category.
+Also seeds minimal optional demo users:
+- `admin@example.com`
+- `accountant@example.com`
 
 ## Quick verification queries
 
@@ -134,7 +153,13 @@ After running `./apply_schema_and_seed.sh`:
 
 - List tables:
   - `SHOW TABLES;`
-- Verify categories:
-  - `SELECT code, name_th, type FROM thai_accounting_categories ORDER BY type, code;`
-- Verify vendors:
-  - `SELECT name, name_th, default_category_id FROM vendors ORDER BY name;`
+
+- Verify categories (top-level):
+  - `SELECT id, name_th, name_en, type FROM categories WHERE parent_id IS NULL ORDER BY type, name_th;`
+
+- Verify category tree (children):
+  - `SELECT c2.name_th AS child_th, c1.name_th AS parent_th, c2.type FROM categories c2 LEFT JOIN categories c1 ON c2.parent_id=c1.id WHERE c2.parent_id IS NOT NULL ORDER BY parent_th, child_th;`
+
+- Verify constraints exist (example):
+  - `SHOW CREATE TABLE classifications;`
+  - `SHOW CREATE TABLE reconciliation_results;`
